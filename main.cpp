@@ -1,116 +1,128 @@
-#include <ctime>
-#include <cstdlib>
-#include "mpi.h"
-
-#define N 512
-
-MPI_Status status;
+#include<mpi.h>
+#include<cstdlib>
 
 
-int matrix1[N][N];
-int matrix2[N][N];
-int productMatrix[N][N];
-
-int i, j, k;
-
-int main(int argc, char **argv)
-{
-    int numberOfProcessors;
-    int processorRank;
-    int numberOfWorkers;
-
-    int sourceProcessor;
-
-    int destinationProcessor;
-
-    int rows;
-
-    int matrixSubset;
-
-    MPI_Init(&argc, &argv);
-
-    MPI_Comm_size(MPI_COMM_WORLD, &numberOfProcessors);
-
-    MPI_Comm_rank(MPI_COMM_WORLD, &processorRank);
-
-    numberOfWorkers = numberOfProcessors - 1;
+int ProcNum;
+int ProcRank;
+int Size = 512;
+double *A;
+double *B;
+double *C;
 
 
-    if (processorRank == 0)
-    {
-        clock_t begin = clock();
+//------------------------------------------------------------
+void fillMatrix(double *pMatrix, int Size) {
+    for (int i = 0; i < Size; i++) {
+        for (int j = 0; j < Size; j++) pMatrix[i * Size + j] = rand() % 10;
+    }
+}
 
-        printf("\nMultiplying a %dx%d matrix using %d processor(s).\n\n", N, N, numberOfProcessors);
+//-------------------------------------------------
+void InitProcess(double *&A, double *&B, double *&C) {
 
-        for (i = 0; i < N; i++)
-        {
-            for (j = 0; j < N; j++)
-            {
-                matrix1[i][j] = (rand() % 10);
-                matrix2[i][j] = (rand() % 10);
-            }
+    MPI_Comm_size(MPI_COMM_WORLD, &ProcNum);
+    MPI_Comm_rank(MPI_COMM_WORLD, &ProcRank);
+
+    MPI_Bcast(&Size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (ProcRank == 0) {
+        A = new double[Size * Size];
+        B = new double[Size * Size];
+        C = new double[Size * Size];
+        fillMatrix(A, Size);
+        fillMatrix(B, Size);
+    }
+}
+
+void Transp(double *&B, int dim) {
+    double temp = 0.0;
+    for (int i = 0; i < dim; i++) {
+        for (int j = i + 1; j < dim; j++) {
+            temp = B[i * dim + j];
+            B[i * dim + j] = B[j * dim + i];
+            B[j * dim + i] = temp;
         }
+    }
+}
 
-        rows = N / numberOfWorkers;
-        matrixSubset = 0;
-
-        for (destinationProcessor = 1; destinationProcessor <= numberOfWorkers; destinationProcessor++)
-        {
-            MPI_Send(&matrixSubset, 1, MPI_INT, destinationProcessor, 1, MPI_COMM_WORLD);
-
-            MPI_Send(&rows, 1, MPI_INT, destinationProcessor, 1, MPI_COMM_WORLD);
-
-            MPI_Send(&matrix1[matrixSubset][0], rows * N, MPI_INT, destinationProcessor, 1, MPI_COMM_WORLD);
-
-            MPI_Send(&matrix2, N * N, MPI_INT, destinationProcessor, 1, MPI_COMM_WORLD);
-
-            matrixSubset = matrixSubset + rows;
-        }
-
-        for (i = 1; i <= numberOfWorkers; i++)
-        {
-            sourceProcessor = i;
-            MPI_Recv(&matrixSubset, 1, MPI_INT, sourceProcessor, 2, MPI_COMM_WORLD, &status);
-            MPI_Recv(&rows, 1, MPI_INT, sourceProcessor, 2, MPI_COMM_WORLD, &status);
-            MPI_Recv(&productMatrix[matrixSubset][0], rows * N, MPI_INT, sourceProcessor, 2, MPI_COMM_WORLD, &status);
-        }
-
-        clock_t end = clock();
-
-        double runTime = (double)(end - begin) / CLOCKS_PER_SEC;
-        printf("Runtime: %f seconds\n", runTime);
+void MatrixMultiplicationMPI(double *&A, double *&B, double *&C, int &Size) {
+    int dim = Size;
+    int i, j, k, p, ind;
+    double temp;
+    MPI_Status Status;
+    int ProcPartSize = dim / ProcNum;
+    int ProcPartElem = ProcPartSize * dim;
+    double *bufA = new double[dim * ProcPartSize];
+    double *bufB = new double[dim * ProcPartSize];
+    double *bufC = new double[dim * ProcPartSize];
+    int ProcPart = dim / ProcNum;
+    int part = ProcPart * dim;
+    if (ProcRank == 0) {
+        Transp(B, Size);
     }
 
+    MPI_Scatter(A, part, MPI_DOUBLE, bufA, part, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Scatter(B, part, MPI_DOUBLE, bufB, part, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    if (processorRank > 0)
-    {
-        sourceProcessor = 0;
-        MPI_Recv(&matrixSubset, 1, MPI_INT, sourceProcessor, 1, MPI_COMM_WORLD, &status);
-        MPI_Recv(&rows, 1, MPI_INT, sourceProcessor, 1, MPI_COMM_WORLD, &status);
-        MPI_Recv(&matrix1, rows * N, MPI_INT, sourceProcessor, 1, MPI_COMM_WORLD, &status);
-        MPI_Recv(&matrix2, N * N, MPI_INT, sourceProcessor, 1, MPI_COMM_WORLD, &status);
+    temp = 0.0;
+    for (i = 0; i < ProcPartSize; i++) {
+        for (j = 0; j < ProcPartSize; j++) {
+            for (k = 0; k < dim; k++) temp += bufA[i * dim + k] * bufB[j * dim + k];
+            bufC[i * dim + j + ProcPartSize * ProcRank] = temp;
+            temp = 0.0;
+        }
+    }
 
-        for (k = 0; k < N; k++)
-        {
-            for (i = 0; i < rows; i++)
-            {
-                productMatrix[i][k] = 0.0;
-                for (j = 0; j < N; j++)
-                {
-                    productMatrix[i][k] = productMatrix[i][k] + matrix1[i][j] * matrix2[j][k];
+    int NextProc;
+    int PrevProc;
+    for (p = 1; p < ProcNum; p++) {
+        NextProc = ProcRank + 1;
+        if (ProcRank == ProcNum - 1) NextProc = 0;
+        PrevProc = ProcRank - 1;
+        if (ProcRank == 0) PrevProc = ProcNum - 1;
+        MPI_Sendrecv_replace(bufB, part, MPI_DOUBLE, NextProc, 0, PrevProc, 0, MPI_COMM_WORLD, &Status);
+        temp = 0.0;
+        for (i = 0; i < ProcPartSize; i++) {
+            for (j = 0; j < ProcPartSize; j++) {
+                for (k = 0; k < dim; k++) {
+                    temp += bufA[i * dim + k] * bufB[j * dim + k];
                 }
+                if (ProcRank - p >= 0)
+                    ind = ProcRank - p;
+                else ind = (ProcNum - p + ProcRank);
+                bufC[i * dim + j + ind * ProcPartSize] = temp;
+                temp = 0.0;
             }
         }
-
-        MPI_Send(&matrixSubset, 1, MPI_INT, 0, 2, MPI_COMM_WORLD);
-        MPI_Send(&rows, 1, MPI_INT, 0, 2, MPI_COMM_WORLD);
-        MPI_Send(&productMatrix, rows * N, MPI_INT, 0, 2, MPI_COMM_WORLD);
     }
+    MPI_Gather(bufC, ProcPartElem, MPI_DOUBLE, C, ProcPartElem, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    MPI_Finalize();
+    delete[]bufA;
+    delete[]bufB;
+    delete[]bufC;
 }
 
 
+int main(int argc, char *argv[]) {
+    double beg, end;
+    MPI_Init(&argc, &argv);
+    InitProcess(A, B, C);
+    beg = MPI_Wtime();
+    MatrixMultiplicationMPI(A, B, C, Size);
+    end = MPI_Wtime();
+    double time = end - beg;
+    if (ProcRank == 0) {
+        printf("\nRuntime for size 512: ");
+        printf("%7.4f", time);
+        printf("\n");
+    }
+    MPI_Finalize();
+    delete[] A;
+    delete[] B;
+    delete[] C;
+    return 0;
+}
+
 // mpic++ main.cpp -o main
 
-// mpiexec -n 5 ./main
+// mpiexec -n 4 ./main
